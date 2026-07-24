@@ -1,6 +1,7 @@
 streamlit
-google-generativeai
-SpeechRecognition
-gTTS
+gtts
 pydub
+SpeechRecognition
+google-generativeai
+pyaudio
 
