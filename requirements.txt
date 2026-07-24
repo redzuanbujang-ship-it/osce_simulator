@@ -3,5 +3,4 @@ gtts
 pydub
 SpeechRecognition
 google-generativeai
-pyaudio
 
