@@ -9,21 +9,66 @@ st.write("DEBUG: app started")
 # Guarded GenAI import and configuration
 # ============================================================
 
+# Guarded GenAI import and configuration (robust)
 GENAI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 genai = None
+genai_client = None
 MODEL_NAME = "gemini-1.5-flash"
 
 if GENAI_API_KEY:
     try:
-        import google.genai as genai_lib
-        genai = genai_lib
-        genai.configure(api_key=GENAI_API_KEY)
+        # Try the modern google-genai import style
+        try:
+            import google.genai as genai_lib
+            genai = genai_lib
+        except Exception:
+            # Fallback to older/alternate package name
+            try:
+                import google.generativeai as genai_lib
+                genai = genai_lib
+            except Exception:
+                genai = None
+
+        # Try several ways to set the API key / create a client depending on package version
+        if genai is not None:
+            # Some versions use genai.configure(api_key=...)
+            if hasattr(genai, "configure"):
+                try:
+                    genai.configure(api_key=GENAI_API_KEY)
+                except Exception as e:
+                    # ignore here; we'll try other client creation below
+                    pass
+
+            # Some versions expose a Client or GenerativeModel class
+            if hasattr(genai, "GenerativeModel"):
+                try:
+                    genai_client = genai.GenerativeModel(MODEL_NAME)
+                except Exception:
+                    genai_client = None
+
+            # Some versions use a Client class or require constructing a client object
+            if genai_client is None and hasattr(genai, "Client"):
+                try:
+                    genai_client = genai.Client(api_key=GENAI_API_KEY)
+                except Exception:
+                    genai_client = None
+
+            # If still not created, try creating a simple wrapper that calls the library's generate method
+            if genai_client is None and hasattr(genai, "generate"):
+                # keep genai module available; we'll call genai.generate(...) later
+                genai_client = genai
+
+        # Final check
+        if genai is None and genai_client is None:
+            raise RuntimeError("GenAI library not found or incompatible.")
     except Exception as e:
-        st.error("Warning: failed to initialize GenAI client. AI features disabled.")
+        st.warning("Warning: failed to initialize GenAI client. AI features disabled.")
         st.write(f"GenAI init error: {e}")
         genai = None
+        genai_client = None
 else:
     st.info("GENAI_API_KEY not set; AI responses will return 'AI key missing.'")
+
 
 # ============================================================
 # CONFIGURATION
