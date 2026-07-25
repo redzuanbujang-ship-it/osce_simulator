@@ -1,22 +1,14 @@
 import streamlit as st
 import time
-import tempfile
-import io
-
-import speech_recognition as sr
-from gtts import gTTS
-from pydub import AudioSegment, effects
-
-import google.generativeai as genai
 import os
+import google.genai as genai   # Updated Gemini API
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-st.set_page_config(page_title="OSCE Voice Simulator", layout="wide")
+st.set_page_config(page_title="OSCE Simulator", layout="wide")
 
-# Set your API key (Streamlit Cloud → Secrets)
 GENAI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 if GENAI_API_KEY:
     genai.configure(api_key=GENAI_API_KEY)
@@ -59,7 +51,7 @@ def get_time_left():
     return max(0, (15 * 60) - elapsed)
 
 # ============================================================
-# PRESET CASES (MAX 2 SYMPTOMS EACH)
+# PRESET CASES
 # ============================================================
 
 PRESET_CASES = {
@@ -111,13 +103,11 @@ def detect_profile_from_text(text: str):
         "breathless": False,
     }
 
-    # Gender
     if any(x in t for x in ["mr ", "encik ", "pakcik ", "man", "boy"]):
         profile["gender"] = "male"
     if any(x in t for x in ["mrs ", "ms ", "puan ", "cik ", "woman", "girl"]):
         profile["gender"] = "female"
 
-    # Age group
     if any(x in t for x in ["child", "boy", "girl", "my child"]):
         profile["age_group"] = "child"
     elif any(x in t for x in ["elderly", "old", "70-year-old", "80-year-old"]):
@@ -127,7 +117,6 @@ def detect_profile_from_text(text: str):
     else:
         profile["age_group"] = "adult"
 
-    # Emotion
     if any(x in t for x in ["anxious", "worried", "scared"]):
         profile["emotion"] = "anxious"
     if any(x in t for x in ["angry", "frustrated", "not happy"]):
@@ -135,51 +124,12 @@ def detect_profile_from_text(text: str):
     if any(x in t for x in ["crying", "tearful", "sad"]):
         profile["emotion"] = "crying"
 
-    # Breathless / pain
     if any(x in t for x in ["breathless", "short of breath", "wheezing"]):
         profile["breathless"] = True
     if "pain" in t or "hurt" in t:
         profile["pain"] = True
 
     return profile
-
-# ============================================================
-# VOICE FILTERS
-# ============================================================
-
-def apply_voice_profile(audio: AudioSegment, profile: dict) -> AudioSegment:
-    audio = effects.normalize(audio)
-
-    # Gender pitch
-    if profile["gender"] == "male":
-        audio = audio._spawn(audio.raw_data, overrides={"frame_rate": int(audio.frame_rate * 0.9)})
-        audio = audio.set_frame_rate(44100)
-    elif profile["gender"] == "female":
-        audio = audio._spawn(audio.raw_data, overrides={"frame_rate": int(audio.frame_rate * 1.05)})
-        audio = audio.set_frame_rate(44100)
-
-    # Age pacing
-    if profile["age_group"] == "elderly":
-        audio = audio.speedup(playback_speed=0.95)
-    elif profile["age_group"] == "child":
-        audio = audio.speedup(playback_speed=1.05)
-
-    # Emotion
-    if profile["emotion"] == "anxious":
-        audio = audio.speedup(playback_speed=1.03)
-    elif profile["emotion"] == "angry":
-        audio = audio.speedup(playback_speed=1.05)
-        audio = audio + 2
-    elif profile["emotion"] == "crying":
-        audio = audio - 2
-
-    # Pain / breathless
-    if profile["breathless"]:
-        audio = audio.speedup(playback_speed=0.97)
-    if profile["pain"]:
-        audio = audio.speedup(playback_speed=0.97)
-
-    return audio
 
 # ============================================================
 # GEMINI PATIENT RESPONSE
@@ -218,46 +168,13 @@ def get_patient_response(case_text: str, conversation: list, doctor_input: str) 
         return "I am having difficulty responding."
 
 # ============================================================
-# TEXT-TO-SPEECH
-# ============================================================
-
-def synthesize_patient_voice(text: str, profile: dict) -> bytes:
-    tts = gTTS(text=text, lang="en")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-        tts.save(tmp.name)
-        audio = AudioSegment.from_mp3(tmp.name)
-
-    audio = apply_voice_profile(audio, profile)
-
-    buf = io.BytesIO()
-    audio.export(buf, format="mp3")
-    return buf.getvalue()
-
-# ============================================================
-# SPEECH-TO-TEXT
-# ============================================================
-
-def transcribe_speech_from_mic() -> str:
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        st.info("Listening...")
-        audio = r.listen(source, timeout=5, phrase_time_limit=10)
-    try:
-        return r.recognize_google(audio)
-    except:
-        return ""
-
-# ============================================================
 # UI LAYOUT
 # ============================================================
 
-st.title("OSCE Voice Simulator (Preset + Custom)")
+st.title("OSCE Simulator (Preset + Custom)")
 
 col_left, col_right = st.columns([2, 1])
 
-# -----------------------------
-# LEFT SIDE
-# -----------------------------
 with col_left:
     st.subheader("Case Selection")
 
@@ -291,20 +208,12 @@ with col_left:
     doctor_input = st.text_input("Doctor:", placeholder="Tell me more about your pain.")
 
     if st.button("🎙️ Use microphone"):
-        spoken = transcribe_speech_from_mic()
-        if spoken:
-            doctor_input = spoken
-            st.success(f"You said: {spoken}")
-        else:
-            st.error("Could not understand speech.")
+        st.error("Microphone is disabled.")
 
     if st.button("Send") and case_text and doctor_input.strip():
         st.session_state.messages.append({"role": "user", "content": doctor_input.strip()})
         reply = get_patient_response(case_text, st.session_state.messages, doctor_input.strip())
         st.session_state.messages.append({"role": "assistant", "content": reply})
-
-        audio_bytes = synthesize_patient_voice(reply, st.session_state.profile)
-        st.audio(audio_bytes, format="audio/mp3")
 
     st.subheader("Conversation Log")
     for msg in st.session_state.messages:
@@ -322,31 +231,3 @@ with col_left:
             "age_group": "adult",
             "emotion": "neutral",
             "pain": False,
-            "breathless": False,
-        }
-        st.success("Station reset.")
-
-# -----------------------------
-# RIGHT SIDE
-# -----------------------------
-with col_right:
-    st.subheader("OSCE Timer (15 minutes)")
-
-    if st.button("Start Timer"):
-        start_timer()
-
-    time_left = get_time_left()
-    minutes = int(time_left // 60)
-    seconds = int(time_left % 60)
-    st.markdown(f"**Time Left:** {minutes:02d}:{seconds:02d}")
-
-    st.subheader("Detected Profile")
-    profile = st.session_state.profile
-
-    st.markdown(f"**Gender:** {profile['gender']}")
-    st.markdown(f"**Age Group:** {profile['age_group']}")
-    st.markdown(f"**Emotion:** {profile['emotion']}")
-    st.markdown(f"**Pain:** {'Yes' if profile['pain'] else 'No'}")
-    st.markdown(f"**Breathless:** {'Yes' if profile['breathless'] else 'No'}")
-
-    st.caption("Voice effects are subtle and OSCE-style.")
