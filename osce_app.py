@@ -189,22 +189,22 @@ def detect_profile_from_text(text: str):
 # GenAI patient response (robust)
 # ============================================================
 def get_patient_response(case_text: str, conversation: list, doctor_input: str) -> str:
-    # Lazy init
+    # Ensure genai is initialized lazily
     init_genai_once()
 
-    # If no key or no client/module available, return fallback
-    if not GENAI_API_KEY or (genai is None and genai_client is None):
+    if not GENAI_API_KEY:
         return "AI key missing."
 
-    # Debug: show what the genai module exposes (one-time)
-    try:
-        if genai is not None and not st.session_state.get("_genai_attrs_shown", False):
-            st.session_state._genai_attrs_shown = True
-            attrs = ", ".join(sorted(dir(genai)))
-            st.info("DEBUG: genai module attributes (first run)")
-            st.write(attrs)
-    except Exception:
-        pass
+    # If we didn't create a client/module, try to create a Client now (based on detected attributes)
+    global genai_client, genai
+    if genai_client is None and genai is not None and hasattr(genai, "Client"):
+        try:
+            genai_client = genai.Client(api_key=GENAI_API_KEY)
+        except Exception:
+            genai_client = None
+
+    if genai is None and genai_client is None:
+        return "AI key missing."
 
     system_prompt = (
         "You are an OSCE standardized patient in Malaysia. "
@@ -218,7 +218,13 @@ def get_patient_response(case_text: str, conversation: list, doctor_input: str) 
         else:
             history += f"Patient: {msg['content']}\n"
 
-    prompt = (
+    # Build a simple chat-style message list for chat APIs
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Case: {case_text}\n\nConversation:\n{history}\nDoctor: {doctor_input}\nPatient:"}
+    ]
+
+    prompt_text = (
         f"{system_prompt}\n\n"
         f"Case: {case_text}\n\n"
         f"Conversation:\n{history}\n"
@@ -227,65 +233,70 @@ def get_patient_response(case_text: str, conversation: list, doctor_input: str) 
     )
 
     try:
-        # 1) Try client object first
+        # 1) If we have a client object, prefer chat or models APIs
         if genai_client is not None:
-            if hasattr(genai_client, "generate_content"):
-                resp = genai_client.generate_content(prompt)
-                return getattr(resp, "text", str(resp)).strip()
-            if hasattr(genai_client, "generate"):
-                resp = genai_client.generate(prompt)
-                return getattr(resp, "text", str(resp)).strip()
-            if hasattr(genai_client, "text_generation"):
+            # Try chat API first (client.chat.create)
+            if hasattr(genai_client, "chat") and hasattr(genai_client.chat, "create"):
+                resp = genai_client.chat.create(model=MODEL_NAME, messages=messages)
+                # response shapes vary: try common fields
+                if hasattr(resp, "content"):
+                    return str(resp.content).strip()
+                if hasattr(resp, "message"):
+                    return getattr(resp.message, "content", str(resp.message)).strip()
+                # fallback to dict-like
                 try:
-                    tg = genai_client.text_generation
-                    if hasattr(tg, "generate"):
-                        resp = tg.generate(prompt)
-                        return getattr(resp, "text", str(resp)).strip()
+                    return str(resp["choices"][0]["message"]["content"]).strip()
                 except Exception:
                     pass
 
-        # 2) Try module-level functions and classes
-        if genai is not None:
-            # Try common class names safely
-            for cls_name in ("GenerativeModel", "TextGenerationModel", "TextModel"):
-                if hasattr(genai, cls_name):
-                    try:
-                        model_cls = getattr(genai, cls_name)
-                        model = model_cls(MODEL_NAME)
-                        if hasattr(model, "generate_content"):
-                            resp = model.generate_content(prompt)
-                            return getattr(resp, "text", str(resp)).strip()
-                        if hasattr(model, "generate"):
-                            resp = model.generate(prompt)
-                            return getattr(resp, "text", str(resp)).strip()
-                    except Exception:
-                        # continue trying other options
-                        pass
+            # Try models.generate (client.models.generate)
+            if hasattr(genai_client, "models") and hasattr(genai_client.models, "generate"):
+                # many versions accept model and prompt or input
+                try:
+                    resp = genai_client.models.generate(model=MODEL_NAME, prompt=prompt_text)
+                except TypeError:
+                    # alternate param name
+                    resp = genai_client.models.generate(model=MODEL_NAME, input=prompt_text)
+                # common response shapes
+                if hasattr(resp, "text"):
+                    return str(resp.text).strip()
+                try:
+                    return str(resp["output"][0]["content"][0]["text"]).strip()
+                except Exception:
+                    pass
 
-            # Try top-level helpers
-            for fn in ("generate_content", "generate", "text_generation"):
-                if hasattr(genai, fn):
-                    try:
-                        fn_obj = getattr(genai, fn)
-                        # if it's a module-like object with generate
-                        if callable(fn_obj):
-                            resp = fn_obj(prompt)
-                            return getattr(resp, "text", str(resp)).strip()
-                        # if it's an object with generate method
-                        if hasattr(fn_obj, "generate"):
-                            resp = fn_obj.generate(prompt)
-                            return getattr(resp, "text", str(resp)).strip()
-                    except Exception:
-                        pass
+        # 2) If module-level functions exist, try them
+        if genai is not None:
+            # module-level chat
+            if hasattr(genai, "chat") and hasattr(genai.chat, "create"):
+                resp = genai.chat.create(model=MODEL_NAME, messages=messages)
+                if hasattr(resp, "content"):
+                    return str(resp.content).strip()
+                try:
+                    return str(resp["choices"][0]["message"]["content"]).strip()
+                except Exception:
+                    pass
+
+            # module-level models.generate
+            if hasattr(genai, "models") and hasattr(genai.models, "generate"):
+                try:
+                    resp = genai.models.generate(model=MODEL_NAME, prompt=prompt_text)
+                except TypeError:
+                    resp = genai.models.generate(model=MODEL_NAME, input=prompt_text)
+                if hasattr(resp, "text"):
+                    return str(resp.text).strip()
+                try:
+                    return str(resp["output"][0]["content"][0]["text"]).strip()
+                except Exception:
+                    pass
 
     except Exception as e:
-        # Show the real error in the UI so you can paste it here
         st.error("GenAI request failed.")
         st.write(f"GenAI error: {e}")
         return "I am having difficulty responding."
 
-    # If nothing matched
     return "AI key missing."
+
 
 
 # ============================================================
