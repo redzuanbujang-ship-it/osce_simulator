@@ -1,19 +1,35 @@
 import streamlit as st
 import time
 import os
-import google.genai as genai   # Updated Gemini API
+
+# Debug banner to confirm the app starts rendering
+st.write("DEBUG: app started")
+
+# ============================================================
+# Guarded GenAI import and configuration
+# ============================================================
+
+GENAI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+genai = None
+MODEL_NAME = "gemini-1.5-flash"
+
+if GENAI_API_KEY:
+    try:
+        import google.genai as genai_lib
+        genai = genai_lib
+        genai.configure(api_key=GENAI_API_KEY)
+    except Exception as e:
+        st.error("Warning: failed to initialize GenAI client. AI features disabled.")
+        st.write(f"GenAI init error: {e}")
+        genai = None
+else:
+    st.info("GENAI_API_KEY not set; AI responses will return 'AI key missing.'")
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
 st.set_page_config(page_title="OSCE Simulator", layout="wide")
-
-GENAI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-if GENAI_API_KEY:
-    genai.configure(api_key=GENAI_API_KEY)
-
-MODEL_NAME = "gemini-1.5-flash"
 
 # ============================================================
 # SESSION STATE INITIALIZATION
@@ -136,11 +152,12 @@ def detect_profile_from_text(text: str):
     return profile
 
 # ============================================================
-# GEMINI PATIENT RESPONSE
+# GEMINI PATIENT RESPONSE (guarded)
 # ============================================================
 
 def get_patient_response(case_text: str, conversation: list, doctor_input: str) -> str:
-    if not GENAI_API_KEY:
+    # If genai client is not initialized, return a clear message
+    if genai is None or not GENAI_API_KEY:
         return "AI key missing."
 
     system_prompt = (
@@ -163,4 +180,102 @@ def get_patient_response(case_text: str, conversation: list, doctor_input: str) 
         f"Patient:"
     )
 
-    model = genai.Generative
+    try:
+        model = genai.GenerativeModel(MODEL_NAME)
+        resp = model.generate_content(prompt)
+        return resp.text.strip()
+    except Exception as e:
+        # Surface the error in the UI and return a fallback message
+        st.error("GenAI request failed.")
+        st.write(f"GenAI error: {e}")
+        return "I am having difficulty responding."
+
+# ============================================================
+# UI LAYOUT
+# ============================================================
+
+st.title("OSCE Simulator (Preset + Custom)")
+
+col_left, col_right = st.columns([2, 1])
+
+with col_left:
+    st.subheader("Case Selection")
+
+    preset_name = st.selectbox(
+        "Select preset case",
+        ["(None)"] + list(PRESET_CASES.keys())
+    )
+
+    custom_case = st.text_area(
+        "Or enter custom case",
+        placeholder="Example: Encik Razak, 55, has chest pain since morning."
+    )
+
+    if custom_case.strip():
+        case_text = custom_case.strip()
+    elif preset_name != "(None)":
+        case_text = PRESET_CASES[preset_name]
+    else:
+        case_text = ""
+
+    st.session_state.current_case = case_text
+
+    if case_text:
+        st.info(f"Active case: {case_text}")
+        st.session_state.profile = detect_profile_from_text(case_text)
+    else:
+        st.warning("Please select a case.")
+
+    st.subheader("Consultation")
+
+    doctor_input = st.text_input("Doctor:", placeholder="Tell me more about your pain.")
+
+    if st.button("🎙️ Use microphone"):
+        st.error("Microphone is disabled.")
+
+    if st.button("Send") and case_text and doctor_input.strip():
+        st.session_state.messages.append({"role": "user", "content": doctor_input.strip()})
+        reply = get_patient_response(case_text, st.session_state.messages, doctor_input.strip())
+        st.session_state.messages.append({"role": "assistant", "content": reply})
+
+    st.subheader("Conversation Log")
+    for msg in st.session_state.messages:
+        if msg["role"] == "user":
+            st.markdown(f"**Doctor:** {msg['content']}")
+        else:
+            st.markdown(f"**Patient:** {msg['content']}")
+
+    if st.button("Reset"):
+        st.session_state.messages = []
+        st.session_state.timer_start = None
+        st.session_state.current_case = ""
+        st.session_state.profile = {
+            "gender": "neutral",
+            "age_group": "adult",
+            "emotion": "neutral",
+            "pain": False,
+            "breathless": False,
+        }
+        st.success("Station reset.")
+
+with col_right:
+    st.subheader("OSCE Timer (15 minutes)")
+
+    if st.button("Start Timer"):
+        start_timer()
+
+    time_left = get_time_left()
+    minutes = int(time_left // 60)
+    seconds = int(time_left % 60)
+    st.markdown(f"**Time Left:** {minutes:02d}:{seconds:02d}")
+
+    st.subheader("Detected Profile")
+    profile = st.session_state.profile
+
+    st.markdown(f"**Gender:** {profile['gender']}")
+    st.markdown(f"**Age Group:** {profile['age_group']}")
+    st.markdown(f"**Emotion:** {profile['emotion']}")
+    st.markdown(f"**Pain:** {'Yes' if profile['pain'] else 'No'}")
+    st.markdown(f"**Breathless:** {'Yes' if profile['breathless'] else 'No'}")
+
+    st.caption("OSCE-style text-only simulator.")
