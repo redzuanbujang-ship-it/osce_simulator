@@ -1,85 +1,80 @@
 import streamlit as st
 import time
 import os
-
-# Debug banner to confirm the app starts rendering
-st.write("DEBUG: app started")
+import importlib
 
 # ============================================================
-# Guarded GenAI import and configuration
+# Page config (must be before other Streamlit UI calls)
 # ============================================================
+st.set_page_config(page_title="OSCE Simulator", layout="wide")
 
-# Guarded GenAI import and configuration (robust)
+# ============================================================
+# Lazy GenAI initialization (non-blocking)
+# ============================================================
 GENAI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 genai = None
 genai_client = None
 MODEL_NAME = "gemini-1.5-flash"
 
-if GENAI_API_KEY:
+def init_genai_once():
+    """
+    Lazy initialize genai module and a client object.
+    This runs only when called (not at import time), and it never raises.
+    """
+    global genai, genai_client
+    if genai is not None or genai_client is not None:
+        return
+
     try:
-        # Try the modern google-genai import style
-        try:
-            import google.genai as genai_lib
-            genai = genai_lib
-        except Exception:
-            # Fallback to older/alternate package name
+        # Try common package names without failing the app
+        for pkg in ("google.genai", "google.generativeai"):
             try:
-                import google.generativeai as genai_lib
-                genai = genai_lib
+                mod = importlib.import_module(pkg)
+                genai = mod
+                break
             except Exception:
-                genai = None
+                continue
 
-        # Try several ways to set the API key / create a client depending on package version
-        if genai is not None:
-            # Some versions use genai.configure(api_key=...)
-            if hasattr(genai, "configure"):
-                try:
-                    genai.configure(api_key=GENAI_API_KEY)
-                except Exception as e:
-                    # ignore here; we'll try other client creation below
-                    pass
+        if genai is None:
+            # library not installed or incompatible; leave genai None
+            return
 
-            # Some versions expose a Client or GenerativeModel class
-            if hasattr(genai, "GenerativeModel"):
-                try:
-                    genai_client = genai.GenerativeModel(MODEL_NAME)
-                except Exception:
-                    genai_client = None
-
-            # Some versions use a Client class or require constructing a client object
-            if genai_client is None and hasattr(genai, "Client"):
+        # Try safe ways to create a client without assuming configure exists
+        try:
+            if hasattr(genai, "Client"):
                 try:
                     genai_client = genai.Client(api_key=GENAI_API_KEY)
                 except Exception:
                     genai_client = None
+        except Exception:
+            genai_client = None
 
-            # If still not created, try creating a simple wrapper that calls the library's generate method
-            if genai_client is None and hasattr(genai, "generate"):
-                # keep genai module available; we'll call genai.generate(...) later
-                genai_client = genai
+        try:
+            if genai_client is None and hasattr(genai, "GenerativeModel"):
+                try:
+                    genai_client = genai.GenerativeModel(MODEL_NAME)
+                except Exception:
+                    genai_client = None
+        except Exception:
+            genai_client = None
 
-        # Final check
-        if genai is None and genai_client is None:
-            raise RuntimeError("GenAI library not found or incompatible.")
-    except Exception as e:
-        st.warning("Warning: failed to initialize GenAI client. AI features disabled.")
-        st.write(f"GenAI init error: {e}")
+        # If module has a top-level configure function, call it but ignore errors
+        try:
+            if hasattr(genai, "configure"):
+                try:
+                    genai.configure(api_key=GENAI_API_KEY)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    except Exception:
         genai = None
         genai_client = None
-else:
-    st.info("GENAI_API_KEY not set; AI responses will return 'AI key missing.'")
-
 
 # ============================================================
-# CONFIGURATION
+# Session state initialization
 # ============================================================
-
-st.set_page_config(page_title="OSCE Simulator", layout="wide")
-
-# ============================================================
-# SESSION STATE INITIALIZATION
-# ============================================================
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -99,9 +94,8 @@ if "profile" not in st.session_state:
     }
 
 # ============================================================
-# TIMER
+# Timer helpers
 # ============================================================
-
 def start_timer():
     st.session_state.timer_start = time.time()
 
@@ -112,9 +106,8 @@ def get_time_left():
     return max(0, (15 * 60) - elapsed)
 
 # ============================================================
-# PRESET CASES
+# Preset cases
 # ============================================================
-
 PRESET_CASES = {
     "Chest Pain": "I have chest pain since morning.",
     "Breathlessness": "I feel breathless when I walk.",
@@ -137,190 +130,4 @@ PRESET_CASES = {
     "Depression": "I don't feel like doing anything.",
     "Angry patient": "I'm not happy with the treatment.",
     "Insomnia": "I can't sleep at night.",
-    "Fever in child": "My child has fever since yesterday.",
-    "Vomiting in child": "My child keeps vomiting.",
-    "Cough in child": "My child has been coughing.",
-    "Early pregnancy bleeding": "I'm having bleeding in early pregnancy.",
-    "Pelvic pain": "I have pain down here.",
-    "Antenatal follow-up": "I came for my pregnancy check.",
-    "Post-operative pain": "I have pain after my surgery.",
-    "Wound infection": "My wound looks red and painful.",
-    "Trauma": "I fell and hurt my leg.",
-    "Shock": "I feel faint and cold.",
-    "Allergic reaction": "I'm having swelling after eating.",
-}
-
-# ============================================================
-# PROFILE DETECTION
-# ============================================================
-
-def detect_profile_from_text(text: str):
-    t = text.lower()
-    profile = {
-        "gender": "neutral",
-        "age_group": "adult",
-        "emotion": "neutral",
-        "pain": False,
-        "breathless": False,
-    }
-
-    # Gender
-    if any(x in t for x in ["mr ", "encik ", "pakcik ", "man", "boy"]):
-        profile["gender"] = "male"
-    if any(x in t for x in ["mrs ", "ms ", "puan ", "cik ", "woman", "girl"]):
-        profile["gender"] = "female"
-
-    # Age group
-    if any(x in t for x in ["child", "boy", "girl", "my child"]):
-        profile["age_group"] = "child"
-    elif any(x in t for x in ["elderly", "old", "70-year-old", "80-year-old"]):
-        profile["age_group"] = "elderly"
-    elif any(x in t for x in ["middle-aged", "45", "50", "55"]):
-        profile["age_group"] = "middle-aged"
-    else:
-        profile["age_group"] = "adult"
-
-    # Emotion
-    if any(x in t for x in ["anxious", "worried", "scared"]):
-        profile["emotion"] = "anxious"
-    if any(x in t for x in ["angry", "frustrated", "not happy"]):
-        profile["emotion"] = "angry"
-    if any(x in t for x in ["crying", "tearful", "sad"]):
-        profile["emotion"] = "crying"
-
-    # Breathless / pain
-    if any(x in t for x in ["breathless", "short of breath", "wheezing"]):
-        profile["breathless"] = True
-    if "pain" in t or "hurt" in t:
-        profile["pain"] = True
-
-    return profile
-
-# ============================================================
-# GEMINI PATIENT RESPONSE (guarded)
-# ============================================================
-
-def get_patient_response(case_text: str, conversation: list, doctor_input: str) -> str:
-    # If genai client is not initialized, return a clear message
-    if genai is None or not GENAI_API_KEY:
-        return "AI key missing."
-
-    system_prompt = (
-        "You are an OSCE standardized patient in Malaysia. "
-        "Respond naturally, briefly, and consistently with the case description."
-    )
-
-    history = ""
-    for msg in conversation:
-        if msg["role"] == "user":
-            history += f"Doctor: {msg['content']}\n"
-        else:
-            history += f"Patient: {msg['content']}\n"
-
-    prompt = (
-        f"{system_prompt}\n\n"
-        f"Case: {case_text}\n\n"
-        f"Conversation:\n{history}\n"
-        f"Doctor: {doctor_input}\n"
-        f"Patient:"
-    )
-
-    try:
-        model = genai.GenerativeModel(MODEL_NAME)
-        resp = model.generate_content(prompt)
-        return resp.text.strip()
-    except Exception as e:
-        # Surface the error in the UI and return a fallback message
-        st.error("GenAI request failed.")
-        st.write(f"GenAI error: {e}")
-        return "I am having difficulty responding."
-
-# ============================================================
-# UI LAYOUT
-# ============================================================
-
-st.title("OSCE Simulator (Preset + Custom)")
-
-col_left, col_right = st.columns([2, 1])
-
-with col_left:
-    st.subheader("Case Selection")
-
-    preset_name = st.selectbox(
-        "Select preset case",
-        ["(None)"] + list(PRESET_CASES.keys())
-    )
-
-    custom_case = st.text_area(
-        "Or enter custom case",
-        placeholder="Example: Encik Razak, 55, has chest pain since morning."
-    )
-
-    if custom_case.strip():
-        case_text = custom_case.strip()
-    elif preset_name != "(None)":
-        case_text = PRESET_CASES[preset_name]
-    else:
-        case_text = ""
-
-    st.session_state.current_case = case_text
-
-    if case_text:
-        st.info(f"Active case: {case_text}")
-        st.session_state.profile = detect_profile_from_text(case_text)
-    else:
-        st.warning("Please select a case.")
-
-    st.subheader("Consultation")
-
-    doctor_input = st.text_input("Doctor:", placeholder="Tell me more about your pain.")
-
-    if st.button("🎙️ Use microphone"):
-        st.error("Microphone is disabled.")
-
-    if st.button("Send") and case_text and doctor_input.strip():
-        st.session_state.messages.append({"role": "user", "content": doctor_input.strip()})
-        reply = get_patient_response(case_text, st.session_state.messages, doctor_input.strip())
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-
-    st.subheader("Conversation Log")
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            st.markdown(f"**Doctor:** {msg['content']}")
-        else:
-            st.markdown(f"**Patient:** {msg['content']}")
-
-    if st.button("Reset"):
-        st.session_state.messages = []
-        st.session_state.timer_start = None
-        st.session_state.current_case = ""
-        st.session_state.profile = {
-            "gender": "neutral",
-            "age_group": "adult",
-            "emotion": "neutral",
-            "pain": False,
-            "breathless": False,
-        }
-        st.success("Station reset.")
-
-with col_right:
-    st.subheader("OSCE Timer (15 minutes)")
-
-    if st.button("Start Timer"):
-        start_timer()
-
-    time_left = get_time_left()
-    minutes = int(time_left // 60)
-    seconds = int(time_left % 60)
-    st.markdown(f"**Time Left:** {minutes:02d}:{seconds:02d}")
-
-    st.subheader("Detected Profile")
-    profile = st.session_state.profile
-
-    st.markdown(f"**Gender:** {profile['gender']}")
-    st.markdown(f"**Age Group:** {profile['age_group']}")
-    st.markdown(f"**Emotion:** {profile['emotion']}")
-    st.markdown(f"**Pain:** {'Yes' if profile['pain'] else 'No'}")
-    st.markdown(f"**Breathless:** {'Yes' if profile['breathless'] else 'No'}")
-
-    st.caption("OSCE-style text-only simulator.")
+    "Fever in child": "My child has
