@@ -99,3 +99,68 @@ def detect_profile_from_text(text: str):
         "gender": "neutral",
         "age_group": "adult",
         "emotion": "neutral",
+        "pain": False,
+        "breathless": False,
+    }
+
+    # Gender
+    if any(x in t for x in ["mr ", "encik ", "pakcik ", "man", "boy"]):
+        profile["gender"] = "male"
+    if any(x in t for x in ["mrs ", "ms ", "puan ", "cik ", "woman", "girl"]):
+        profile["gender"] = "female"
+
+    # Age group
+    if any(x in t for x in ["child", "boy", "girl", "my child"]):
+        profile["age_group"] = "child"
+    elif any(x in t for x in ["elderly", "old", "70-year-old", "80-year-old"]):
+        profile["age_group"] = "elderly"
+    elif any(x in t for x in ["middle-aged", "45", "50", "55"]):
+        profile["age_group"] = "middle-aged"
+    else:
+        profile["age_group"] = "adult"
+
+    # Emotion
+    if any(x in t for x in ["anxious", "worried", "scared"]):
+        profile["emotion"] = "anxious"
+    if any(x in t for x in ["angry", "frustrated", "not happy"]):
+        profile["emotion"] = "angry"
+    if any(x in t for x in ["crying", "tearful", "sad"]):
+        profile["emotion"] = "crying"
+
+    # Breathless / pain
+    if any(x in t for x in ["breathless", "short of breath", "wheezing"]):
+        profile["breathless"] = True
+    if "pain" in t or "hurt" in t:
+        profile["pain"] = True
+
+    return profile
+
+# ============================================================
+# GEMINI PATIENT RESPONSE
+# ============================================================
+
+def get_patient_response(case_text: str, conversation: list, doctor_input: str) -> str:
+    if not GENAI_API_KEY:
+        return "AI key missing."
+
+    system_prompt = (
+        "You are an OSCE standardized patient in Malaysia. "
+        "Respond naturally, briefly, and consistently with the case description."
+    )
+
+    history = ""
+    for msg in conversation:
+        if msg["role"] == "user":
+            history += f"Doctor: {msg['content']}\n"
+        else:
+            history += f"Patient: {msg['content']}\n"
+
+    prompt = (
+        f"{system_prompt}\n\n"
+        f"Case: {case_text}\n\n"
+        f"Conversation:\n{history}\n"
+        f"Doctor: {doctor_input}\n"
+        f"Patient:"
+    )
+
+    model = genai.Generative
