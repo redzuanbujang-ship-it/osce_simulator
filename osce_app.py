@@ -12,6 +12,7 @@ st.set_page_config(page_title="OSCE Simulator", layout="wide")
 # Lazy GenAI initialization (non-blocking)
 # ============================================================
 GENAI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+st.write("DEBUG: GEMINI_API_KEY present:", bool(GENAI_API_KEY))
 genai = None
 genai_client = None
 MODEL_NAME = "gemini-1.5-flash"
@@ -188,10 +189,22 @@ def detect_profile_from_text(text: str):
 # GenAI patient response (robust)
 # ============================================================
 def get_patient_response(case_text: str, conversation: list, doctor_input: str) -> str:
+    # Lazy init
     init_genai_once()
 
+    # If no key or no client/module available, return fallback
     if not GENAI_API_KEY or (genai is None and genai_client is None):
         return "AI key missing."
+
+    # Debug: show what the genai module exposes (one-time)
+    try:
+        if genai is not None and not st.session_state.get("_genai_attrs_shown", False):
+            st.session_state._genai_attrs_shown = True
+            attrs = ", ".join(sorted(dir(genai)))
+            st.info("DEBUG: genai module attributes (first run)")
+            st.write(attrs)
+    except Exception:
+        pass
 
     system_prompt = (
         "You are an OSCE standardized patient in Malaysia. "
@@ -214,7 +227,7 @@ def get_patient_response(case_text: str, conversation: list, doctor_input: str) 
     )
 
     try:
-        # Try client object first
+        # 1) Try client object first
         if genai_client is not None:
             if hasattr(genai_client, "generate_content"):
                 resp = genai_client.generate_content(prompt)
@@ -231,47 +244,49 @@ def get_patient_response(case_text: str, conversation: list, doctor_input: str) 
                 except Exception:
                     pass
 
-        # Try module-level functions and classes
+        # 2) Try module-level functions and classes
         if genai is not None:
-            if hasattr(genai, "GenerativeModel"):
-                try:
-                    model = genai.GenerativeModel(MODEL_NAME)
-                    if hasattr(model, "generate_content"):
-                        resp = model.generate_content(prompt)
-                        return getattr(resp, "text", str(resp)).strip()
-                except Exception:
-                    pass
+            # Try common class names safely
+            for cls_name in ("GenerativeModel", "TextGenerationModel", "TextModel"):
+                if hasattr(genai, cls_name):
+                    try:
+                        model_cls = getattr(genai, cls_name)
+                        model = model_cls(MODEL_NAME)
+                        if hasattr(model, "generate_content"):
+                            resp = model.generate_content(prompt)
+                            return getattr(resp, "text", str(resp)).strip()
+                        if hasattr(model, "generate"):
+                            resp = model.generate(prompt)
+                            return getattr(resp, "text", str(resp)).strip()
+                    except Exception:
+                        # continue trying other options
+                        pass
 
-            if hasattr(genai, "TextGenerationModel"):
-                try:
-                    model = genai.TextGenerationModel(MODEL_NAME)
-                    if hasattr(model, "generate"):
-                        resp = model.generate(prompt)
-                        return getattr(resp, "text", str(resp)).strip()
-                except Exception:
-                    pass
-
-            if hasattr(genai, "generate_content"):
-                resp = genai.generate_content(prompt)
-                return getattr(resp, "text", str(resp)).strip()
-            if hasattr(genai, "generate"):
-                resp = genai.generate(prompt)
-                return getattr(resp, "text", str(resp)).strip()
-            if hasattr(genai, "text_generation"):
-                try:
-                    tg = genai.text_generation
-                    if hasattr(tg, "generate"):
-                        resp = tg.generate(prompt)
-                        return getattr(resp, "text", str(resp)).strip()
-                except Exception:
-                    pass
+            # Try top-level helpers
+            for fn in ("generate_content", "generate", "text_generation"):
+                if hasattr(genai, fn):
+                    try:
+                        fn_obj = getattr(genai, fn)
+                        # if it's a module-like object with generate
+                        if callable(fn_obj):
+                            resp = fn_obj(prompt)
+                            return getattr(resp, "text", str(resp)).strip()
+                        # if it's an object with generate method
+                        if hasattr(fn_obj, "generate"):
+                            resp = fn_obj.generate(prompt)
+                            return getattr(resp, "text", str(resp)).strip()
+                    except Exception:
+                        pass
 
     except Exception as e:
+        # Show the real error in the UI so you can paste it here
         st.error("GenAI request failed.")
         st.write(f"GenAI error: {e}")
         return "I am having difficulty responding."
 
+    # If nothing matched
     return "AI key missing."
+
 
 # ============================================================
 # UI layout
